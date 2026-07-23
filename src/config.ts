@@ -109,8 +109,11 @@ export function loadConfig(): AppConfig {
       clientSecret: process.env.SIMPLIFI_CLIENT_SECRET ?? "BCDCxXwdWYcj@bK6",
       redirectUri: process.env.SIMPLIFI_REDIRECT_URI ?? "https://simplifi.quicken.com/login",
       tokenEncryptionKey: process.env.SIMPLIFI_TOKEN_ENC_KEY?.trim() || undefined,
-      threatMetrixSessionId: process.env.SIMPLIFI_THREAT_METRIX_SESSION_ID,
-      threatMetrixRequestId: process.env.SIMPLIFI_THREAT_METRIX_REQUEST_ID,
+      // Coerce empty-string env vars to undefined so the auth service's
+      // `?? randomUUID()` fallback fires (an empty string would otherwise be sent
+      // verbatim, which Simplifi rejects with "must be specified").
+      threatMetrixSessionId: process.env.SIMPLIFI_THREAT_METRIX_SESSION_ID?.trim() || undefined,
+      threatMetrixRequestId: process.env.SIMPLIFI_THREAT_METRIX_REQUEST_ID?.trim() || undefined,
       httpTimeoutMs: getNumberEnv("SIMPLIFI_HTTP_TIMEOUT_MS", 30_000),
       syncIntervalMs: getNumberEnv("SIMPLIFI_SYNC_INTERVAL_MS", 60_000),
       maxStaleMs: getNumberEnv("SIMPLIFI_MAX_STALE_MS", 120_000),

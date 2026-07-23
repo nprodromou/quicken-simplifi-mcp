@@ -14,6 +14,7 @@ export interface SyncResult {
 export class SyncService {
   private intervalHandle: NodeJS.Timeout | null = null;
   private activeSync: Promise<SyncResult> | null = null;
+  private awaitingAuthLogged = false;
 
   public constructor(
     private readonly config: AppConfig["simplifi"],
@@ -21,12 +22,36 @@ export class SyncService {
     private readonly client: SimplifiClient,
   ) {}
 
+  /**
+   * A background sync must never *initiate* a credential login: on an MFA-enabled
+   * account that fires an MFA challenge, and a repeating timer would fire one every
+   * tick (spamming the user and tripping Simplifi's "too many MFA attempts" gate).
+   * Interactive OAuth authorization seeds the first token; only then does the
+   * background loop have something to refresh against.
+   */
+  private hasStoredAuth(): boolean {
+    // Require a usable refresh token, not merely a row: clearTokens() leaves an
+    // empty-string row behind, which would otherwise re-open the credential-login
+    // path on the next tick.
+    const tokens = this.db.getSimplifiTokens();
+    return tokens !== null && tokens.refreshToken.trim().length > 0;
+  }
+
   public start(): void {
     if (this.intervalHandle) {
       return;
     }
 
     this.intervalHandle = setInterval(() => {
+      if (!this.hasStoredAuth()) {
+        if (!this.awaitingAuthLogged) {
+          logInfo("Skipping background Simplifi sync until interactive authorization completes");
+          this.awaitingAuthLogged = true;
+        }
+        return;
+      }
+      this.awaitingAuthLogged = false;
+
       void this.syncIncremental().catch((error: unknown) => {
         logError("Background incremental sync failed", {
           error: error instanceof Error ? error.message : String(error),
@@ -45,6 +70,13 @@ export class SyncService {
   public async ensureInitialized(): Promise<SyncResult> {
     const state = this.db.getSyncState();
     if (state.lastFullSyncAt) {
+      return { mode: "noop", pages: 0, transactions: 0, asOf: state.lastAsOf };
+    }
+
+    // Don't kick off the initial sync (and thus a credential login) before the
+    // user has authorized interactively — see hasStoredAuth().
+    if (!this.hasStoredAuth()) {
+      logInfo("Deferring initial Simplifi sync until interactive authorization completes");
       return { mode: "noop", pages: 0, transactions: 0, asOf: state.lastAsOf };
     }
 
