@@ -7,3 +7,4 @@ data/
 *.sqlite-wal
 npm-debug.log*
 .DS_Store
+.env.*
