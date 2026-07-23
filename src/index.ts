@@ -11,7 +11,7 @@ import { SyncService } from "./sync/sync-service.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const db = new DatabaseContext(config.cache.dbPath);
+  const db = new DatabaseContext(config.cache.dbPath, config.simplifi.tokenEncryptionKey);
   const oauthService = new OAuthService(config.oauth, db);
 
   const simplifiAuthService = new SimplifiAuthService(config.simplifi, db);

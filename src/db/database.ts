@@ -14,6 +14,8 @@ import type {
   TransactionPage,
 } from "../types.js";
 import { decodeCursor, encodeCursor, nowIso, sha256Base64Url } from "../utils.js";
+import { logWarn } from "../logger.js";
+import { TokenCipher } from "./token-cipher.js";
 
 export interface TransactionQuery extends TransactionFilters {
   cursor?: string;
@@ -98,12 +100,21 @@ export interface ReferenceSyncState {
 export class DatabaseContext {
   private readonly db: any;
 
-  public constructor(dbPath: string) {
+  private readonly tokenCipher: TokenCipher | null;
+
+  public constructor(dbPath: string, tokenEncryptionKey?: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new BetterSqlite3(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.migrate();
+
+    this.tokenCipher = tokenEncryptionKey ? new TokenCipher(tokenEncryptionKey) : null;
+    if (!this.tokenCipher) {
+      logWarn(
+        "SIMPLIFI_TOKEN_ENC_KEY not set — Simplifi access/refresh tokens are stored UNENCRYPTED in the local SQLite cache. Set it (via `op run`) to encrypt tokens at rest.",
+      );
+    }
   }
 
   public close(): void {
@@ -243,13 +254,24 @@ export class DatabaseContext {
       return null;
     }
 
-    return {
-      accessToken: row.access_token,
-      accessTokenExpiresAt: row.access_token_expires_at,
-      refreshToken: row.refresh_token,
-      refreshTokenExpiresAt: row.refresh_token_expires_at ?? undefined,
-      updatedAt: row.updated_at,
-    };
+    try {
+      return {
+        accessToken: this.decryptToken(row.access_token),
+        accessTokenExpiresAt: row.access_token_expires_at,
+        refreshToken: this.decryptToken(row.refresh_token),
+        refreshTokenExpiresAt: row.refresh_token_expires_at ?? undefined,
+        updatedAt: row.updated_at,
+      };
+    } catch (error) {
+      // A decryption failure means the stored tokens can't be recovered with the
+      // configured key (wrong/rotated key, or a tampered/corrupt row). Discard
+      // them so the caller falls back to a clean credential re-login rather than
+      // crashing the request path.
+      logWarn("Failed to decrypt cached Simplifi tokens; discarding and forcing re-login", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   public saveSimplifiTokens(tokens: SimplifiTokenSet): void {
@@ -273,12 +295,29 @@ export class DatabaseContext {
         `,
       )
       .run({
-        accessToken: tokens.accessToken,
+        accessToken: this.encryptToken(tokens.accessToken),
         accessTokenExpiresAt: tokens.accessTokenExpiresAt,
-        refreshToken: tokens.refreshToken,
+        refreshToken: this.encryptToken(tokens.refreshToken),
         refreshTokenExpiresAt: tokens.refreshTokenExpiresAt ?? null,
         updatedAt: nowIso(),
       });
+  }
+
+  private encryptToken(value: string): string {
+    return this.tokenCipher ? this.tokenCipher.encrypt(value) : value;
+  }
+
+  private decryptToken(value: string): string {
+    // When no cipher is configured, still transparently decrypt any rows that
+    // were written while a key WAS configured (so removing the key doesn't
+    // hand encrypted blobs back to the auth service as if they were tokens).
+    if (!this.tokenCipher) {
+      if (TokenCipher.isEncrypted(value)) {
+        throw new Error("Token is encrypted but SIMPLIFI_TOKEN_ENC_KEY is not configured");
+      }
+      return value;
+    }
+    return this.tokenCipher.decrypt(value);
   }
 
   public getSyncState(): SyncState {

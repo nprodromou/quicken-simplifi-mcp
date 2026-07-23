@@ -31,6 +31,7 @@ export interface AppConfig {
     clientId: string;
     clientSecret: string;
     redirectUri: string;
+    tokenEncryptionKey?: string;
     threatMetrixSessionId?: string;
     threatMetrixRequestId?: string;
     httpTimeoutMs: number;
@@ -107,6 +108,7 @@ export function loadConfig(): AppConfig {
       clientId: process.env.SIMPLIFI_CLIENT_ID ?? "acme_web",
       clientSecret: process.env.SIMPLIFI_CLIENT_SECRET ?? "BCDCxXwdWYcj@bK6",
       redirectUri: process.env.SIMPLIFI_REDIRECT_URI ?? "https://simplifi.quicken.com/login",
+      tokenEncryptionKey: process.env.SIMPLIFI_TOKEN_ENC_KEY?.trim() || undefined,
       threatMetrixSessionId: process.env.SIMPLIFI_THREAT_METRIX_SESSION_ID,
       threatMetrixRequestId: process.env.SIMPLIFI_THREAT_METRIX_REQUEST_ID,
       httpTimeoutMs: getNumberEnv("SIMPLIFI_HTTP_TIMEOUT_MS", 30_000),
