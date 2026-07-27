@@ -219,18 +219,41 @@ export class SimplifiAuthService {
   }
 
   private async processSuccessfulAuthorize(response: Response): Promise<SimplifiTokenSet> {
+    // The authorization code can arrive either as a Location header (HTTP
+    // redirect) or inside the JSON body's `redirectUri` field (Simplifi returns
+    // the code this way on a 200 response). Check both before giving up.
+    const candidates: string[] = [];
+
     const location = response.headers.get("location");
-    if (!location) {
-      throw new Error("Simplifi authorize did not return a location header with auth code");
+    if (location) {
+      candidates.push(location);
     }
 
-    const codeUrl = new URL(location);
-    const code = codeUrl.searchParams.get("code");
-    if (!code) {
-      throw new Error("Simplifi authorize location header missing authorization code");
+    let bodyText = "";
+    try {
+      bodyText = await response.text();
+      const body = JSON.parse(bodyText) as { redirectUri?: unknown };
+      if (typeof body.redirectUri === "string") {
+        candidates.push(body.redirectUri);
+      }
+    } catch {
+      // non-JSON or empty body — the Location header (if any) is our only source
     }
 
-    return this.exchangeAuthorizationCode(code);
+    for (const candidate of candidates) {
+      try {
+        const code = new URL(candidate).searchParams.get("code");
+        if (code && code !== "null") {
+          return this.exchangeAuthorizationCode(code);
+        }
+      } catch {
+        // not a parseable URL — try the next candidate
+      }
+    }
+
+    throw new Error(
+      `Simplifi authorize did not return an authorization code (checked Location header and body redirectUri). body=${bodyText.slice(0, 300)}`,
+    );
   }
 
   private async refreshToken(refreshToken: string): Promise<SimplifiTokenSet> {

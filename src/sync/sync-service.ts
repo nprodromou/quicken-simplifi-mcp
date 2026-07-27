@@ -14,12 +14,39 @@ export interface SyncResult {
 export class SyncService {
   private intervalHandle: NodeJS.Timeout | null = null;
   private activeSync: Promise<SyncResult> | null = null;
+  private awaitingAuthLogged = false;
 
   public constructor(
     private readonly config: AppConfig["simplifi"],
     private readonly db: DatabaseContext,
     private readonly client: SimplifiClient,
   ) {}
+
+  /**
+   * A sync must never *initiate* a credential login: on an MFA-enabled account that
+   * fires an MFA challenge, and any repeated trigger (the background timer, or MCP
+   * tool refreshes via ensureFresh) would fire one each time — spamming the user and
+   * tripping Simplifi's "too many MFA attempts" gate. Interactive OAuth authorization
+   * seeds the first token; only then does a sync have something to refresh against.
+   * Enforced at the syncFull()/syncIncremental() chokepoint so every entrypoint —
+   * timer, ensureInitialized, ensureFresh, and direct calls — is covered.
+   */
+  private hasStoredAuth(): boolean {
+    // Require a usable refresh token, not merely a row: clearTokens() leaves an
+    // empty-string row behind, which would otherwise re-open the credential-login
+    // path on the next tick.
+    const tokens = this.db.getSimplifiTokens();
+    return tokens !== null && tokens.refreshToken.trim().length > 0;
+  }
+
+  private awaitingAuthNoop(): SyncResult {
+    if (!this.awaitingAuthLogged) {
+      logInfo("Skipping Simplifi sync until interactive authorization completes (no stored refresh token)");
+      this.awaitingAuthLogged = true;
+    }
+    const state = this.db.getSyncState();
+    return { mode: "noop", pages: 0, transactions: 0, asOf: state.lastAsOf };
+  }
 
   public start(): void {
     if (this.intervalHandle) {
@@ -66,10 +93,18 @@ export class SyncService {
   }
 
   public async syncFull(): Promise<SyncResult> {
+    if (!this.hasStoredAuth()) {
+      return this.awaitingAuthNoop();
+    }
+    this.awaitingAuthLogged = false;
     return this.withLock(() => this.doFullSync());
   }
 
   public async syncIncremental(): Promise<SyncResult> {
+    if (!this.hasStoredAuth()) {
+      return this.awaitingAuthNoop();
+    }
+    this.awaitingAuthLogged = false;
     return this.withLock(() => this.doIncrementalSync());
   }
 
