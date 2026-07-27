@@ -23,11 +23,13 @@ export class SyncService {
   ) {}
 
   /**
-   * A background sync must never *initiate* a credential login: on an MFA-enabled
-   * account that fires an MFA challenge, and a repeating timer would fire one every
-   * tick (spamming the user and tripping Simplifi's "too many MFA attempts" gate).
-   * Interactive OAuth authorization seeds the first token; only then does the
-   * background loop have something to refresh against.
+   * A sync must never *initiate* a credential login: on an MFA-enabled account that
+   * fires an MFA challenge, and any repeated trigger (the background timer, or MCP
+   * tool refreshes via ensureFresh) would fire one each time — spamming the user and
+   * tripping Simplifi's "too many MFA attempts" gate. Interactive OAuth authorization
+   * seeds the first token; only then does a sync have something to refresh against.
+   * Enforced at the syncFull()/syncIncremental() chokepoint so every entrypoint —
+   * timer, ensureInitialized, ensureFresh, and direct calls — is covered.
    */
   private hasStoredAuth(): boolean {
     // Require a usable refresh token, not merely a row: clearTokens() leaves an
@@ -37,21 +39,21 @@ export class SyncService {
     return tokens !== null && tokens.refreshToken.trim().length > 0;
   }
 
+  private awaitingAuthNoop(): SyncResult {
+    if (!this.awaitingAuthLogged) {
+      logInfo("Skipping Simplifi sync until interactive authorization completes (no stored refresh token)");
+      this.awaitingAuthLogged = true;
+    }
+    const state = this.db.getSyncState();
+    return { mode: "noop", pages: 0, transactions: 0, asOf: state.lastAsOf };
+  }
+
   public start(): void {
     if (this.intervalHandle) {
       return;
     }
 
     this.intervalHandle = setInterval(() => {
-      if (!this.hasStoredAuth()) {
-        if (!this.awaitingAuthLogged) {
-          logInfo("Skipping background Simplifi sync until interactive authorization completes");
-          this.awaitingAuthLogged = true;
-        }
-        return;
-      }
-      this.awaitingAuthLogged = false;
-
       void this.syncIncremental().catch((error: unknown) => {
         logError("Background incremental sync failed", {
           error: error instanceof Error ? error.message : String(error),
@@ -73,13 +75,6 @@ export class SyncService {
       return { mode: "noop", pages: 0, transactions: 0, asOf: state.lastAsOf };
     }
 
-    // Don't kick off the initial sync (and thus a credential login) before the
-    // user has authorized interactively — see hasStoredAuth().
-    if (!this.hasStoredAuth()) {
-      logInfo("Deferring initial Simplifi sync until interactive authorization completes");
-      return { mode: "noop", pages: 0, transactions: 0, asOf: state.lastAsOf };
-    }
-
     return this.syncFull();
   }
 
@@ -98,10 +93,18 @@ export class SyncService {
   }
 
   public async syncFull(): Promise<SyncResult> {
+    if (!this.hasStoredAuth()) {
+      return this.awaitingAuthNoop();
+    }
+    this.awaitingAuthLogged = false;
     return this.withLock(() => this.doFullSync());
   }
 
   public async syncIncremental(): Promise<SyncResult> {
+    if (!this.hasStoredAuth()) {
+      return this.awaitingAuthNoop();
+    }
+    this.awaitingAuthLogged = false;
     return this.withLock(() => this.doIncrementalSync());
   }
 
