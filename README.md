@@ -13,11 +13,13 @@ It provides MCP tools:
 - `list_categories` / `search_categories`
 - `list_tags` / `search_tags`
 - `suggest_categories_for_merchant`
+- `simplifi_status`
 
 It includes:
 - local transaction cache (SQLite)
 - automatic full + incremental sync from Simplifi
 - OAuth 2.0 (Authorization Code + PKCE, plus refresh tokens) to protect `/mcp`
+- an optional static bearer (`MCP_API_KEY`) for headless clients
 
 ## How It Works
 
@@ -32,15 +34,27 @@ By default it uses the Simplifi web client values observed in HAR traffic:
 - `SIMPLIFI_REDIRECT_URI=https://simplifi.quicken.com/login`
 
 Runtime behavior:
-1. Login with `/oauth/authorize` + `/oauth/token` to obtain tokens.
-2. Persist access/refresh token in local SQLite.
+1. Login with `/oauth/authorize` + `/oauth/token` to obtain tokens. This happens only
+   inside the browser authorize page (an MCP client's OAuth flow, or `/seed`), because
+   on an MFA-enabled account it sends an MFA challenge that has to be answered there.
+2. Persist access/refresh token in local SQLite (encrypted when `SIMPLIFI_TOKEN_ENC_KEY` is set).
 3. Use refresh token automatically when access token expires.
+4. Never start a credential login from the background sync or a tool call. If Simplifi
+   rejects the refresh token (HTTP 400/401/403), the server drops it, the sync loop goes
+   idle, and `simplifi_status` reports `awaiting_authorization` until someone logs in
+   through `/seed` again. A 429, a 5xx or a network failure keeps the token for the next
+   attempt.
 
 ### 2) MCP downstream auth
 Your MCP clients authenticate to this server via OAuth 2.0:
 - `GET /oauth/authorize`
 - `POST /oauth/token`
 - bearer access token on `Authorization: Bearer ...` for `/mcp`
+
+Clients that cannot run a browser flow can instead send a static bearer: set
+`MCP_API_KEY` (at least 32 characters) and send `Authorization: Bearer <MCP_API_KEY>`.
+OAuth access tokens keep working alongside it. Leave `MCP_API_KEY` unset to keep
+`/mcp` OAuth-only.
 
 This keeps Simplifi credentials/tokens server-side only.
 
@@ -55,14 +69,28 @@ This keeps Simplifi credentials/tokens server-side only.
 - `src/http/server.ts`: HTTP server, OAuth endpoints, MCP transport
 - `src/mcp/server.ts`: MCP tool definitions
 - `src/services/transaction-tool-service.ts`: tool behavior
+- `src/services/status-service.ts`: `simplifi_status` (authorization + sync health)
 - `src/simplifi/*`: Simplifi auth + API client
 - `src/sync/sync-service.ts`: sync orchestration
 - `src/db/database.ts`: SQLite schema + repository methods
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22 (pinned in `.node-version` and `mise.toml`; `better-sqlite3` has no
+  prebuilt binary for newer majors)
 - Yarn 1.x
+
+## Development checks
+
+```bash
+yarn run check   # typecheck (`yarn check` alone runs Yarn's built-in, not this)
+yarn run test    # unit tests
+docker build -t quicken-simplifi-mcp:smoke . && scripts/smoke.sh quicken-simplifi-mcp:smoke
+```
+
+CI (`.github/workflows/ci.yml`) runs all three on every pull request with a read-only
+token. On `main`, a separate publish job (the only one with `packages: write`) rebuilds,
+smoke-runs and pushes `ghcr.io/nprodromou/quicken-simplifi-mcp:sha-<short>`.
 
 ## Setup
 
@@ -195,6 +223,15 @@ Inputs:
 
 Returns the most common categories historically used for that merchant in your cached transactions (joined to category names when available).
 
+### `simplifi_status`
+Inputs: none.
+
+Returns whether a Simplifi authorization is held (`authorized` or
+`awaiting_authorization`, with an `authorizeUrl` in the latter case), token expiry
+times, the sync loop's last status, times and error, and the cached transaction count.
+It reads local state only and never contacts Simplifi, so it is safe to poll from a
+liveness check.
+
 ## Production Deployment
 
 ### Option A: systemd (VM/bare-metal)
@@ -251,6 +288,14 @@ docker run -d \
   - `GET /.well-known/oauth-authorization-server`
   - `GET /.well-known/openid-configuration`
 - Cache lives in SQLite at `CACHE_DB_PATH`.
+- MCP sessions live in memory. A session idle for 24 hours is closed by an hourly
+  sweep, and a request for an unknown or closed session gets `404`, which tells the
+  client to initialize a new one (after a sweep or a restart).
+- Seeding a headless deployment: open `GET /seed` in a browser, log in with
+  `OAUTH_LOGIN_USERNAME` / `OAUTH_LOGIN_PASSWORD`, and enter the Simplifi MFA code if
+  asked. The seed flow stores the Simplifi login only; it issues no MCP authorization
+  code, so its callback URL carries nothing redeemable. The next background sync (within `SIMPLIFI_SYNC_INTERVAL_MS`) starts the full
+  sync. Repeat whenever `simplifi_status` reports `awaiting_authorization`.
 
 ## Troubleshooting
 
@@ -258,5 +303,7 @@ docker run -d \
   - token expired/invalid, re-run OAuth flow.
 - Simplifi sync errors:
   - verify `SIMPLIFI_EMAIL`, `SIMPLIFI_PASSWORD`, and `SIMPLIFI_DATASET_ID`.
+- Sync idle, `simplifi_status` says `awaiting_authorization`:
+  - no refresh token is held (never seeded, or Simplifi rejected it). Log in via `/seed`.
 - Empty cache on first start:
   - initial full sync runs in background; wait, then retry tool call.

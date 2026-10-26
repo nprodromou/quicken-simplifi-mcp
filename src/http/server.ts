@@ -1,15 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import type { AppConfig } from "../config.js";
+import { SEED_CLIENT_ID, seedRedirectUri, type AppConfig } from "../config.js";
 import { logInfo, logWarn } from "../logger.js";
 import { createMcpServer } from "../mcp/server.js";
-import { OAuthService } from "../oauth/oauth-service.js";
+import { OAuthService, type AuthorizeRequest } from "../oauth/oauth-service.js";
 import { SimplifiAuthService } from "../simplifi/auth-service.js";
+import { StatusService } from "../services/status-service.js";
 import { TransactionToolService } from "../services/transaction-tool-service.js";
 
 interface HttpServerDeps {
@@ -17,9 +18,21 @@ interface HttpServerDeps {
   oauthService: OAuthService;
   simplifiAuthService: SimplifiAuthService;
   toolService: TransactionToolService;
+  statusService: StatusService;
+}
+
+const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
+const SESSION_SWEEP_MS = 60 * 60 * 1000;
+
+// Compares digests so the check takes the same time whatever the token's length.
+function matchesStaticKey(token: string, key: string): boolean {
+  const presented = createHash("sha256").update(token).digest();
+  const expected = createHash("sha256").update(key).digest();
+  return timingSafeEqual(presented, expected);
 }
 
 export interface RunningHttpServer {
+  port: number;
   close: () => Promise<void>;
 }
 
@@ -46,10 +59,27 @@ function readBearerToken(req: Request): string | null {
 }
 
 export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttpServer> {
-  const { config, oauthService, simplifiAuthService, toolService } = deps;
+  const { config, oauthService, simplifiAuthService, toolService, statusService } = deps;
 
   const app = express();
   const sessions = new Map<string, StreamableHTTPServerTransport>();
+  const sessionLastSeen = new Map<string, number>();
+
+  // A client that exits without sending DELETE (killed, crashed, laptop shut)
+  // leaves its session here. Without a sweep they accumulate until the process
+  // restarts; with it, the map holds at most the sessions used in the last day.
+  const sessionSweep = setInterval(() => {
+    const cutoff = Date.now() - SESSION_IDLE_MS;
+    for (const [id, lastSeen] of sessionLastSeen) {
+      if (lastSeen < cutoff) {
+        const idle = sessions.get(id);
+        sessions.delete(id);
+        sessionLastSeen.delete(id);
+        void idle?.close();
+      }
+    }
+  }, SESSION_SWEEP_MS);
+  sessionSweep.unref();
 
   app.disable("x-powered-by");
   app.use(
@@ -87,6 +117,22 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     res.status(201).json(response);
   });
 
+  const seedCallback = seedRedirectUri(config.server.publicBaseUrl);
+
+  // Ends a successful login: issue a code to the client, except on the seed flow.
+  // Seeding exists to store the Simplifi login, not to mint an MCP credential, so
+  // it redirects to its callback with no code at all. Nothing redeemable ever sits
+  // in that URL, browser history or an access log. Keyed on the redirect, not the
+  // client_id, so no client can collect a code at the seed callback either.
+  const finishAuthorization = (request: AuthorizeRequest, res: Response): void => {
+    if (request.redirectUri === seedCallback) {
+      res.redirect(302, seedCallback);
+      return;
+    }
+    const code = oauthService.issueAuthorizationCode(request);
+    res.redirect(302, oauthService.buildAuthorizeRedirect(request, code));
+  };
+
   app.post("/oauth/authorize", async (req, res) => {
     try {
       const request = oauthService.parseAuthorizeRequest(toRecord(req.body));
@@ -108,9 +154,7 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
         return;
       }
 
-      const code = oauthService.issueAuthorizationCode(request);
-      const redirect = oauthService.buildAuthorizeRedirect(request, code);
-      res.redirect(302, redirect);
+      finishAuthorization(request, res);
     } catch (error) {
       res.status(400).type("text/plain").send(error instanceof Error ? error.message : "Invalid authorize request");
     }
@@ -147,12 +191,33 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
         return;
       }
 
-      const code = oauthService.issueAuthorizationCode(request);
-      const redirect = oauthService.buildAuthorizeRedirect(request, code);
-      res.redirect(302, redirect);
+      finishAuthorization(request, res);
     } catch (error) {
       res.status(400).type("text/plain").send(error instanceof Error ? error.message : "Invalid MFA request");
     }
+  });
+
+  // Seeding the Simplifi login on a headless deployment. MFA can only be answered
+  // in a browser, so this sends the operator through the same authorize page an
+  // OAuth client would use, with a redirect back here instead of to a client.
+  // finishAuthorization() issues no authorization code on this path.
+  app.get("/seed", (_req, res) => {
+    const authorize = new URL("/oauth/authorize", config.server.publicBaseUrl);
+    authorize.searchParams.set("response_type", "code");
+    authorize.searchParams.set("client_id", SEED_CLIENT_ID);
+    authorize.searchParams.set("redirect_uri", seedCallback);
+    res.redirect(302, authorize.pathname + authorize.search);
+  });
+
+  app.get("/seed/done", (_req, res) => {
+    const authorized = simplifiAuthService.getAuthStatus().authorized;
+    const message = authorized
+      ? "Simplifi is authorized. The next background sync (within a minute) picks it up."
+      : "Simplifi is still not authorized. Start again from /seed.";
+    res
+      .status(authorized ? 200 : 409)
+      .type("html")
+      .send(`<!doctype html><title>Simplifi MCP</title><p>${message}</p>`);
   });
 
   app.post("/oauth/token", (req, res) => {
@@ -174,6 +239,11 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
       return;
     }
 
+    if (config.server.mcpApiKey && matchesStaticKey(token, config.server.mcpApiKey)) {
+      next();
+      return;
+    }
+
     try {
       oauthService.verifyAccessToken(token);
       next();
@@ -192,19 +262,34 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     const sessionId = req.header("mcp-session-id");
     let transport = sessionId ? sessions.get(sessionId) : undefined;
 
+    // An unknown session (swept, or lost to a restart) gets 404, which the MCP
+    // spec tells clients to answer by initializing a new session. Handing it to
+    // a fresh transport instead would return 400 "not initialized", which they
+    // treat as fatal.
+    if (sessionId && !transport) {
+      res.status(404).json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
+      return;
+    }
+
+    if (sessionId) {
+      sessionLastSeen.set(sessionId, Date.now());
+    }
+
     try {
       if (!transport) {
-        const mcpServer = createMcpServer(toolService);
+        const mcpServer = createMcpServer(toolService, statusService);
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
             sessions.set(newSessionId, transport!);
+            sessionLastSeen.set(newSessionId, Date.now());
           },
         });
 
         transport.onclose = () => {
           if (transport!.sessionId) {
             sessions.delete(transport!.sessionId);
+            sessionLastSeen.delete(transport!.sessionId);
           }
         };
 
@@ -246,10 +331,13 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
   });
 
   return {
+    port: address.port,
     close: async () => {
+      clearInterval(sessionSweep);
       for (const [sessionId] of sessions.entries()) {
         sessions.delete(sessionId);
       }
+      sessionLastSeen.clear();
 
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {

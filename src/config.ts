@@ -9,6 +9,7 @@ export interface AppConfig {
     port: number;
     publicBaseUrl: string;
     corsOrigin: string;
+    mcpApiKey?: string;
   };
   cache: {
     dbPath: string;
@@ -73,6 +74,37 @@ function parseRedirectAllowlist(raw: string): string[] {
     .filter(Boolean);
 }
 
+// The /seed flow (src/http/server.ts) runs the authorize page as this client and
+// redirects back to the server itself.
+export const SEED_CLIENT_ID = "seed";
+
+export function seedRedirectUri(publicBaseUrl: string): string {
+  return new URL("/seed/done", publicBaseUrl).toString();
+}
+
+// An empty allowlist already admits every redirect. A non-empty one must still
+// admit the server's own seed callback, or /seed stops working.
+function withSeedRedirect(allowlist: string[], publicBaseUrl: string): string[] {
+  if (allowlist.length === 0) {
+    return allowlist;
+  }
+  const seed = seedRedirectUri(publicBaseUrl);
+  return allowlist.includes(seed) ? allowlist : [...allowlist, seed];
+}
+
+// Optional static bearer for headless MCP clients that cannot run an OAuth browser
+// flow. Unset keeps /mcp OAuth-only. A short key is refused rather than accepted.
+function parseMcpApiKey(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) {
+    return undefined;
+  }
+  if (value.length < 32) {
+    throw new Error("MCP_API_KEY must be at least 32 characters");
+  }
+  return value;
+}
+
 export function loadConfig(): AppConfig {
   const port = getNumberEnv("PORT", 8787);
   const host = process.env.HOST ?? "0.0.0.0";
@@ -86,6 +118,7 @@ export function loadConfig(): AppConfig {
       port,
       publicBaseUrl,
       corsOrigin: process.env.CORS_ORIGIN ?? "*",
+      mcpApiKey: parseMcpApiKey(process.env.MCP_API_KEY),
     },
     cache: {
       dbPath: cacheDbPath,
@@ -98,7 +131,10 @@ export function loadConfig(): AppConfig {
       refreshTokenTtlSeconds: getNumberEnv("OAUTH_REFRESH_TOKEN_TTL_SECONDS", 60 * 60 * 24 * 30),
       loginUsername: getEnv("OAUTH_LOGIN_USERNAME"),
       loginPassword: getEnv("OAUTH_LOGIN_PASSWORD"),
-      allowedRedirectUris: parseRedirectAllowlist(process.env.OAUTH_ALLOWED_REDIRECT_URIS ?? ""),
+      allowedRedirectUris: withSeedRedirect(
+        parseRedirectAllowlist(process.env.OAUTH_ALLOWED_REDIRECT_URIS ?? ""),
+        publicBaseUrl,
+      ),
     },
     simplifi: {
       baseUrl: process.env.SIMPLIFI_BASE_URL ?? "https://services.quicken.com",

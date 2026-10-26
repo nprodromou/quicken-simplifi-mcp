@@ -3,6 +3,7 @@ import { DatabaseContext } from "./db/database.js";
 import { startHttpServer } from "./http/server.js";
 import { logError, logInfo } from "./logger.js";
 import { OAuthService } from "./oauth/oauth-service.js";
+import { StatusService } from "./services/status-service.js";
 import { TransactionToolService } from "./services/transaction-tool-service.js";
 import { ReferenceDataService } from "./services/reference-data-service.js";
 import { SimplifiAuthService } from "./simplifi/auth-service.js";
@@ -35,11 +36,13 @@ async function main(): Promise<void> {
     referenceDataService,
     config.simplifi.maxStaleMs,
   );
+  const statusService = new StatusService(db, simplifiAuthService, config.server.publicBaseUrl);
   const httpServer = await startHttpServer({
     config,
     oauthService,
     simplifiAuthService,
     toolService,
+    statusService,
   });
 
   const shutdown = async (signal: string): Promise<void> => {

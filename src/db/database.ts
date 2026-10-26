@@ -494,6 +494,11 @@ export class DatabaseContext {
     return JSON.parse(row.raw_json) as Transaction;
   }
 
+  public countTransactions(): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM transactions WHERE is_deleted = 0`).get() as { n: number };
+    return row.n;
+  }
+
   public listTransactions(query: TransactionQuery): TransactionPage {
     return this.queryTransactions({
       query,
