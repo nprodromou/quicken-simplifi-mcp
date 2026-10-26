@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { SEED_CLIENT_ID, seedRedirectUri, type AppConfig } from "../config.js";
 import { logInfo, logWarn } from "../logger.js";
 import { createMcpServer } from "../mcp/server.js";
-import { OAuthService } from "../oauth/oauth-service.js";
+import { OAuthService, type AuthorizeRequest } from "../oauth/oauth-service.js";
 import { SimplifiAuthService } from "../simplifi/auth-service.js";
 import { StatusService } from "../services/status-service.js";
 import { TransactionToolService } from "../services/transaction-tool-service.js";
@@ -32,6 +32,7 @@ function matchesStaticKey(token: string, key: string): boolean {
 }
 
 export interface RunningHttpServer {
+  port: number;
   close: () => Promise<void>;
 }
 
@@ -116,6 +117,22 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     res.status(201).json(response);
   });
 
+  const seedCallback = seedRedirectUri(config.server.publicBaseUrl);
+
+  // Ends a successful login: issue a code to the client, except on the seed flow.
+  // Seeding exists to store the Simplifi login, not to mint an MCP credential, so
+  // it redirects to its callback with no code at all. Nothing redeemable ever sits
+  // in that URL, browser history or an access log. Keyed on the redirect, not the
+  // client_id, so no client can collect a code at the seed callback either.
+  const finishAuthorization = (request: AuthorizeRequest, res: Response): void => {
+    if (request.redirectUri === seedCallback) {
+      res.redirect(302, seedCallback);
+      return;
+    }
+    const code = oauthService.issueAuthorizationCode(request);
+    res.redirect(302, oauthService.buildAuthorizeRedirect(request, code));
+  };
+
   app.post("/oauth/authorize", async (req, res) => {
     try {
       const request = oauthService.parseAuthorizeRequest(toRecord(req.body));
@@ -137,9 +154,7 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
         return;
       }
 
-      const code = oauthService.issueAuthorizationCode(request);
-      const redirect = oauthService.buildAuthorizeRedirect(request, code);
-      res.redirect(302, redirect);
+      finishAuthorization(request, res);
     } catch (error) {
       res.status(400).type("text/plain").send(error instanceof Error ? error.message : "Invalid authorize request");
     }
@@ -176,9 +191,7 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
         return;
       }
 
-      const code = oauthService.issueAuthorizationCode(request);
-      const redirect = oauthService.buildAuthorizeRedirect(request, code);
-      res.redirect(302, redirect);
+      finishAuthorization(request, res);
     } catch (error) {
       res.status(400).type("text/plain").send(error instanceof Error ? error.message : "Invalid MFA request");
     }
@@ -187,12 +200,12 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
   // Seeding the Simplifi login on a headless deployment. MFA can only be answered
   // in a browser, so this sends the operator through the same authorize page an
   // OAuth client would use, with a redirect back here instead of to a client.
-  // The authorization code it issues is never exchanged and expires in 5 minutes.
+  // finishAuthorization() issues no authorization code on this path.
   app.get("/seed", (_req, res) => {
     const authorize = new URL("/oauth/authorize", config.server.publicBaseUrl);
     authorize.searchParams.set("response_type", "code");
     authorize.searchParams.set("client_id", SEED_CLIENT_ID);
-    authorize.searchParams.set("redirect_uri", seedRedirectUri(config.server.publicBaseUrl));
+    authorize.searchParams.set("redirect_uri", seedCallback);
     res.redirect(302, authorize.pathname + authorize.search);
   });
 
@@ -318,6 +331,7 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
   });
 
   return {
+    port: address.port,
     close: async () => {
       clearInterval(sessionSweep);
       for (const [sessionId] of sessions.entries()) {

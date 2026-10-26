@@ -88,8 +88,9 @@ yarn run test    # unit tests
 docker build -t quicken-simplifi-mcp:smoke . && scripts/smoke.sh quicken-simplifi-mcp:smoke
 ```
 
-CI (`.github/workflows/ci.yml`) runs all three on every pull request and pushes the
-smoke-tested image to `ghcr.io/nprodromou/quicken-simplifi-mcp:sha-<short>` from `main`.
+CI (`.github/workflows/ci.yml`) runs all three on every pull request with a read-only
+token. On `main`, a separate publish job (the only one with `packages: write`) rebuilds,
+smoke-runs and pushes `ghcr.io/nprodromou/quicken-simplifi-mcp:sha-<short>`.
 
 ## Setup
 
@@ -292,7 +293,8 @@ docker run -d \
   client to initialize a new one (after a sweep or a restart).
 - Seeding a headless deployment: open `GET /seed` in a browser, log in with
   `OAUTH_LOGIN_USERNAME` / `OAUTH_LOGIN_PASSWORD`, and enter the Simplifi MFA code if
-  asked. The next background sync (within `SIMPLIFI_SYNC_INTERVAL_MS`) starts the full
+  asked. The seed flow stores the Simplifi login only; it issues no MCP authorization
+  code, so its callback URL carries nothing redeemable. The next background sync (within `SIMPLIFI_SYNC_INTERVAL_MS`) starts the full
   sync. Repeat whenever `simplifi_status` reports `awaiting_authorization`.
 
 ## Troubleshooting
