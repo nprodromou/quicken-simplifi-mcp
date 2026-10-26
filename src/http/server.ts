@@ -21,6 +21,9 @@ interface HttpServerDeps {
   statusService: StatusService;
 }
 
+const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
+const SESSION_SWEEP_MS = 60 * 60 * 1000;
+
 // Compares digests so the check takes the same time whatever the token's length.
 function matchesStaticKey(token: string, key: string): boolean {
   const presented = createHash("sha256").update(token).digest();
@@ -59,6 +62,23 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
 
   const app = express();
   const sessions = new Map<string, StreamableHTTPServerTransport>();
+  const sessionLastSeen = new Map<string, number>();
+
+  // A client that exits without sending DELETE (killed, crashed, laptop shut)
+  // leaves its session here. Without a sweep they accumulate until the process
+  // restarts; with it, the map holds at most the sessions used in the last day.
+  const sessionSweep = setInterval(() => {
+    const cutoff = Date.now() - SESSION_IDLE_MS;
+    for (const [id, lastSeen] of sessionLastSeen) {
+      if (lastSeen < cutoff) {
+        const idle = sessions.get(id);
+        sessions.delete(id);
+        sessionLastSeen.delete(id);
+        void idle?.close();
+      }
+    }
+  }, SESSION_SWEEP_MS);
+  sessionSweep.unref();
 
   app.disable("x-powered-by");
   app.use(
@@ -229,6 +249,19 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     const sessionId = req.header("mcp-session-id");
     let transport = sessionId ? sessions.get(sessionId) : undefined;
 
+    // An unknown session (swept, or lost to a restart) gets 404, which the MCP
+    // spec tells clients to answer by initializing a new session. Handing it to
+    // a fresh transport instead would return 400 "not initialized", which they
+    // treat as fatal.
+    if (sessionId && !transport) {
+      res.status(404).json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
+      return;
+    }
+
+    if (sessionId) {
+      sessionLastSeen.set(sessionId, Date.now());
+    }
+
     try {
       if (!transport) {
         const mcpServer = createMcpServer(toolService, statusService);
@@ -236,12 +269,14 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
             sessions.set(newSessionId, transport!);
+            sessionLastSeen.set(newSessionId, Date.now());
           },
         });
 
         transport.onclose = () => {
           if (transport!.sessionId) {
             sessions.delete(transport!.sessionId);
+            sessionLastSeen.delete(transport!.sessionId);
           }
         };
 
@@ -284,9 +319,11 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
 
   return {
     close: async () => {
+      clearInterval(sessionSweep);
       for (const [sessionId] of sessions.entries()) {
         sessions.delete(sessionId);
       }
+      sessionLastSeen.clear();
 
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {

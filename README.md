@@ -287,6 +287,9 @@ docker run -d \
   - `GET /.well-known/oauth-authorization-server`
   - `GET /.well-known/openid-configuration`
 - Cache lives in SQLite at `CACHE_DB_PATH`.
+- MCP sessions live in memory. A session idle for 24 hours is closed by an hourly
+  sweep, and a request for an unknown or closed session gets `404`, which tells the
+  client to initialize a new one (after a sweep or a restart).
 - Seeding a headless deployment: open `GET /seed` in a browser, log in with
   `OAUTH_LOGIN_USERNAME` / `OAUTH_LOGIN_PASSWORD`, and enter the Simplifi MFA code if
   asked. The next background sync (within `SIMPLIFI_SYNC_INTERVAL_MS`) starts the full

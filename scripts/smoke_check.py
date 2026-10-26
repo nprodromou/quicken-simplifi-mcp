@@ -111,6 +111,17 @@ report = json.loads(result["content"][0]["text"])
 check(report.get("authorization") == "awaiting_authorization", "simplifi_status reports awaiting_authorization")
 check(report.get("authorizeUrl", "").endswith("/seed"), "simplifi_status points at /seed")
 
+status, _, _ = request("/mcp", None, token=KEY, session=session, method="DELETE")
+check(status == 200, f"DELETE closes the session (got {status})")
+
+status, _, _ = request("/mcp", {"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, token=KEY, session=session)
+check(status == 404, f"a closed session answers 404 so clients re-initialize (got {status})")
+
+status, _, _ = request(
+    "/mcp", {"jsonrpc": "2.0", "id": 5, "method": "tools/list"}, token=KEY, session="00000000-0000-0000-0000-000000000000"
+)
+check(status == 404, f"an unknown session answers 404 (got {status})")
+
 status, headers, _ = request("/seed")
 location = {k.lower(): v for k, v in headers.items()}.get("location", "")
 check(status == 302 and "/oauth/authorize?" in location and "client_id=seed" in location, "/seed redirects to the authorize page")
