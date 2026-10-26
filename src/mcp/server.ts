@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import { StatusService } from "../services/status-service.js";
 import { TransactionToolService } from "../services/transaction-tool-service.js";
 
 function toToolResponse(payload: unknown): { content: Array<{ type: "text"; text: string }> } {
@@ -9,12 +10,19 @@ function toToolResponse(payload: unknown): { content: Array<{ type: "text"; text
   };
 }
 
-export function createMcpServer(toolService: TransactionToolService): McpServer {
+export function createMcpServer(toolService: TransactionToolService, statusService: StatusService): McpServer {
   const server = new McpServer({
     name: "quicken-simplifi-mcp",
     version: "0.1.0",
   });
   const mcp = server as any;
+
+  mcp.tool(
+    "simplifi_status",
+    "Report whether the server holds a Simplifi authorization and how the background sync is doing. Never contacts Simplifi.",
+    {},
+    async () => toToolResponse(statusService.getStatus()),
+  );
 
   mcp.tool(
     "list_transactions",

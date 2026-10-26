@@ -22,6 +22,29 @@ export type AttemptLoginResult =
   | { status: "ok" }
   | { status: "mfa_required"; pendingId: string; mfaChannel: string; email?: string; phone?: string };
 
+export interface SimplifiAuthStatus {
+  authorized: boolean;
+  accessTokenExpiresAt?: string;
+  refreshTokenExpiresAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Simplifi rejected the stored refresh token (or there is none). Only an interactive
+ * login through the OAuth authorize page can recover, because that is the one path
+ * allowed to answer an MFA challenge.
+ */
+export class SimplifiReauthRequiredError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "SimplifiReauthRequiredError";
+  }
+}
+
+// Statuses on which Simplifi has refused the refresh token itself. Anything else
+// (429, 5xx, a network failure) is transient and the token is kept for a retry.
+const REFRESH_REJECTED_STATUSES = new Set([400, 401, 403]);
+
 export class SimplifiAuthService {
   private readonly pendingMfaMap = new Map<string, PendingMfa>();
 
@@ -30,6 +53,13 @@ export class SimplifiAuthService {
     private readonly db: DatabaseContext,
   ) {}
 
+  /**
+   * Returns a usable access token, refreshing it when needed, and never starts a
+   * credential login. On an MFA-enabled account a credential login sends an MFA
+   * challenge, so a background sync falling back to one would send a challenge on
+   * every tick until Simplifi locks the account out. Only attemptLogin(), driven
+   * from the OAuth authorize page, may log in with credentials.
+   */
   public async getAccessToken(): Promise<string> {
     const cached = this.db.getSimplifiTokens();
 
@@ -37,21 +67,41 @@ export class SimplifiAuthService {
       return cached.accessToken;
     }
 
-    if (cached?.refreshToken) {
-      try {
-        const refreshed = await this.refreshToken(cached.refreshToken);
-        this.db.saveSimplifiTokens(refreshed);
-        return refreshed.accessToken;
-      } catch (error) {
-        logWarn("Simplifi token refresh failed; attempting credential re-login", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    if (!cached?.refreshToken) {
+      throw new SimplifiReauthRequiredError(
+        "No stored Simplifi refresh token. Complete the browser authorization to seed one.",
+      );
     }
 
-    const created = await this.loginWithCredentials();
-    this.db.saveSimplifiTokens(created);
-    return created.accessToken;
+    try {
+      const refreshed = await this.refreshToken(cached.refreshToken);
+      this.db.saveSimplifiTokens(refreshed);
+      return refreshed.accessToken;
+    } catch (error) {
+      if (error instanceof SimplifiReauthRequiredError) {
+        // Drop the dead token so hasStoredAuth() turns the sync loop into a no-op
+        // instead of retrying a refresh that cannot succeed.
+        this.clearTokens();
+        logWarn("Simplifi rejected the refresh token; browser re-authorization required", {
+          error: error.message,
+        });
+      }
+      throw error;
+    }
+  }
+
+  public getAuthStatus(): SimplifiAuthStatus {
+    const cached = this.db.getSimplifiTokens();
+    if (!cached || cached.refreshToken.trim().length === 0) {
+      return { authorized: false };
+    }
+
+    return {
+      authorized: true,
+      accessTokenExpiresAt: cached.accessTokenExpiresAt,
+      refreshTokenExpiresAt: cached.refreshTokenExpiresAt,
+      updatedAt: cached.updatedAt,
+    };
   }
 
   /**
@@ -160,35 +210,6 @@ export class SimplifiAuthService {
     return { mfaChannel: pending.mfaChannel, email: pending.email, phone: pending.phone };
   }
 
-  private async loginWithCredentials(): Promise<SimplifiTokenSet> {
-    const threatMetrixSessionId = this.config.threatMetrixSessionId ?? randomUUID();
-    const threatMetrixRequestId = this.config.threatMetrixRequestId ?? null;
-
-    const authorizeResponse = await this.callAuthorize({
-      mfaChannel: null,
-      mfaCode: null,
-      mfaId: null,
-      threatMetrixSessionId,
-      threatMetrixRequestId,
-    });
-
-    if (authorizeResponse.status === 202) {
-      const body = await authorizeResponse.text();
-      throw new Error(
-        `Simplifi MFA required. Please re-authorize your MCP client via the OAuth login flow. body=${body}`,
-      );
-    }
-
-    if (![200, 201].includes(authorizeResponse.status)) {
-      const body = await authorizeResponse.text();
-      throw new Error(`Simplifi authorize failed: status=${authorizeResponse.status}, body=${body}`);
-    }
-
-    const token = await this.processSuccessfulAuthorize(authorizeResponse);
-    logInfo("Simplifi credential login completed");
-    return token;
-  }
-
   private async callAuthorize(opts: {
     mfaChannel: string | null;
     mfaCode: string | null;
@@ -273,7 +294,11 @@ export class SimplifiAuthService {
 
     if (response.status !== 200) {
       const body = await response.text();
-      throw new Error(`Simplifi token refresh failed: status=${response.status}, body=${body}`);
+      const message = `Simplifi token refresh failed: status=${response.status}, body=${body}`;
+      if (REFRESH_REJECTED_STATUSES.has(response.status)) {
+        throw new SimplifiReauthRequiredError(message);
+      }
+      throw new Error(message);
     }
 
     const payload = (await response.json()) as Record<string, unknown>;

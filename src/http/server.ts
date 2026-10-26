@@ -1,15 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import type { AppConfig } from "../config.js";
+import { SEED_CLIENT_ID, seedRedirectUri, type AppConfig } from "../config.js";
 import { logInfo, logWarn } from "../logger.js";
 import { createMcpServer } from "../mcp/server.js";
 import { OAuthService } from "../oauth/oauth-service.js";
 import { SimplifiAuthService } from "../simplifi/auth-service.js";
+import { StatusService } from "../services/status-service.js";
 import { TransactionToolService } from "../services/transaction-tool-service.js";
 
 interface HttpServerDeps {
@@ -17,6 +18,14 @@ interface HttpServerDeps {
   oauthService: OAuthService;
   simplifiAuthService: SimplifiAuthService;
   toolService: TransactionToolService;
+  statusService: StatusService;
+}
+
+// Compares digests so the check takes the same time whatever the token's length.
+function matchesStaticKey(token: string, key: string): boolean {
+  const presented = createHash("sha256").update(token).digest();
+  const expected = createHash("sha256").update(key).digest();
+  return timingSafeEqual(presented, expected);
 }
 
 export interface RunningHttpServer {
@@ -46,7 +55,7 @@ function readBearerToken(req: Request): string | null {
 }
 
 export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttpServer> {
-  const { config, oauthService, simplifiAuthService, toolService } = deps;
+  const { config, oauthService, simplifiAuthService, toolService, statusService } = deps;
 
   const app = express();
   const sessions = new Map<string, StreamableHTTPServerTransport>();
@@ -155,6 +164,29 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     }
   });
 
+  // Seeding the Simplifi login on a headless deployment. MFA can only be answered
+  // in a browser, so this sends the operator through the same authorize page an
+  // OAuth client would use, with a redirect back here instead of to a client.
+  // The authorization code it issues is never exchanged and expires in 5 minutes.
+  app.get("/seed", (_req, res) => {
+    const authorize = new URL("/oauth/authorize", config.server.publicBaseUrl);
+    authorize.searchParams.set("response_type", "code");
+    authorize.searchParams.set("client_id", SEED_CLIENT_ID);
+    authorize.searchParams.set("redirect_uri", seedRedirectUri(config.server.publicBaseUrl));
+    res.redirect(302, authorize.pathname + authorize.search);
+  });
+
+  app.get("/seed/done", (_req, res) => {
+    const authorized = simplifiAuthService.getAuthStatus().authorized;
+    const message = authorized
+      ? "Simplifi is authorized. The next background sync (within a minute) picks it up."
+      : "Simplifi is still not authorized. Start again from /seed.";
+    res
+      .status(authorized ? 200 : 409)
+      .type("html")
+      .send(`<!doctype html><title>Simplifi MCP</title><p>${message}</p>`);
+  });
+
   app.post("/oauth/token", (req, res) => {
     try {
       const payload = oauthService.exchangeToken(toRecord(req.body));
@@ -171,6 +203,11 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     const token = readBearerToken(req);
     if (!token) {
       res.status(401).json({ error: "invalid_token", error_description: "Missing bearer token" });
+      return;
+    }
+
+    if (config.server.mcpApiKey && matchesStaticKey(token, config.server.mcpApiKey)) {
+      next();
       return;
     }
 
@@ -194,7 +231,7 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
 
     try {
       if (!transport) {
-        const mcpServer = createMcpServer(toolService);
+        const mcpServer = createMcpServer(toolService, statusService);
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
