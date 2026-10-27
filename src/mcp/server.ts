@@ -26,7 +26,7 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
 
   mcp.tool(
     "list_transactions",
-    "List locally cached Simplifi transactions with optional filters and pagination.",
+    "List locally cached Simplifi transactions with optional filters and pagination. Projected recurring bills are excluded unless includeProjected is true.",
     {
       limit: z.coerce.number().int().min(1).max(200).optional(),
       cursor: z.string().optional(),
@@ -36,6 +36,7 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
       minAmount: z.number().optional(),
       maxAmount: z.number().optional(),
       includeDeleted: z.boolean().optional(),
+      includeProjected: z.boolean().optional(),
       refresh: z.boolean().optional(),
     },
     async (input: any) => {
@@ -46,7 +47,7 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
 
   mcp.tool(
     "search_transactions",
-    "Search locally cached Simplifi transactions by text with optional filters.",
+    "Search locally cached Simplifi transactions by text with optional filters. Projected recurring bills are excluded unless includeProjected is true.",
     {
       query: z.string().min(1),
       limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -57,6 +58,7 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
       minAmount: z.number().optional(),
       maxAmount: z.number().optional(),
       includeDeleted: z.boolean().optional(),
+      includeProjected: z.boolean().optional(),
       refresh: z.boolean().optional(),
     },
     async (input: any) => {
@@ -106,7 +108,7 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
 
   mcp.tool(
     "list_uncategorized_transactions",
-    "List transactions that look uncategorized (coa.type=UNCATEGORIZED or coa.id=0).",
+    "List transactions that look uncategorized (coa.type=UNCATEGORIZED or coa.id=0). Projected recurring bills are excluded unless includeProjected is true.",
     {
       limit: z.coerce.number().int().min(1).max(200).optional(),
       cursor: z.string().optional(),
@@ -116,6 +118,7 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
       minAmount: z.number().optional(),
       maxAmount: z.number().optional(),
       includeDeleted: z.boolean().optional(),
+      includeProjected: z.boolean().optional(),
       refresh: z.boolean().optional(),
     },
     async (input: any) => {
