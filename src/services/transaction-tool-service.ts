@@ -215,6 +215,7 @@ export class TransactionToolService {
     minAmount?: number;
     maxAmount?: number;
     includeDeleted?: boolean;
+    includeProjected?: boolean;
   }): TransactionQuery {
     return {
       limit: Math.min(Math.max(input.limit ?? 50, 1), 200),
@@ -225,6 +226,7 @@ export class TransactionToolService {
       minAmount: input.minAmount,
       maxAmount: input.maxAmount,
       includeDeleted: input.includeDeleted,
+      includeProjected: input.includeProjected,
     };
   }
 

@@ -127,6 +127,7 @@ export interface TransactionFilters {
   minAmount?: number;
   maxAmount?: number;
   includeDeleted?: boolean;
+  includeProjected?: boolean;
 }
 
 export interface TransactionPage {

@@ -153,12 +153,22 @@ Inputs (all optional):
 - `minAmount`
 - `maxAmount`
 - `includeDeleted`
+- `includeProjected` (default false)
 - `refresh`
+
+By default the transaction tools leave out Simplifi's projected recurring
+transactions: the future-dated `PENDING` rows Simplifi generates from scheduled
+bills and subscriptions, plus overdue ones that never matched a bank transaction.
+They carry `source: SCHEDULED_TRANSACTION_PENDING`, and because results sort by
+`postedOn` descending they would otherwise crowd out real activity. Pass
+`includeProjected: true` to get them back, for example to see upcoming bills.
+A projection that has matched a real transaction (`source: SCHEDULED_TRANSACTION`)
+is a real transaction and is always included.
 
 ### `search_transactions`
 Inputs:
 - `query` (required)
-- same optional filters as `list_transactions`
+- same optional filters as `list_transactions`, including `includeProjected`
 
 ### `get_transaction`
 Inputs:
@@ -180,7 +190,7 @@ Inputs:
 Sets `coa.type=CATEGORY` and `coa.id=<categoryId>` via `update_transaction`.
 
 ### `list_uncategorized_transactions`
-Inputs: same as `list_transactions`
+Inputs: same as `list_transactions`, including `includeProjected`
 
 Returns transactions that appear uncategorized (typically `coa.type=UNCATEGORIZED` or `coa.id=0`).
 

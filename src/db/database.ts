@@ -17,6 +17,12 @@ import { decodeCursor, encodeCursor, nowIso, sha256Base64Url } from "../utils.js
 import { logWarn } from "../logger.js";
 import { TokenCipher } from "./token-cipher.js";
 
+// Simplifi's projected recurring transactions (future bills from scheduled
+// reminders, including overdue ones that never matched a bank transaction).
+// Once a projection matches a real transaction its source becomes
+// SCHEDULED_TRANSACTION, which is kept.
+export const PROJECTED_TRANSACTION_SOURCE = "SCHEDULED_TRANSACTION_PENDING";
+
 export interface TransactionQuery extends TransactionFilters {
   cursor?: string;
   limit: number;
@@ -555,6 +561,11 @@ export class DatabaseContext {
 
     if (!args.query.includeDeleted) {
       where.push("is_deleted = 0");
+    }
+
+    if (!args.query.includeProjected) {
+      where.push("COALESCE(json_extract(raw_json, '$.source'), '') <> ?");
+      values.push(PROJECTED_TRANSACTION_SOURCE);
     }
 
     if (args.extraWhere && args.extraWhere.length > 0) {
