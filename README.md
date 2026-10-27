@@ -199,8 +199,11 @@ Inputs:
 - `query` (required)
 - `limit` (optional, 1-200)
 - `includeDeleted` (optional)
+- `includeProjected` (default false)
 
 Returns merchant name suggestions derived from cached transactions (grouped and counted).
+Projected recurring bills are not counted unless `includeProjected` is true, the
+same rule as `list_transactions`.
 
 ### `list_categories`
 Inputs:
@@ -230,8 +233,11 @@ Inputs:
 - `limit` (optional, 1-20)
 - `matchMode` (optional: `exact` or `contains`)
 - `refreshCategories` (optional)
+- `includeProjected` (default false)
 
 Returns the most common categories historically used for that merchant in your cached transactions (joined to category names when available).
+Projected recurring bills are not counted unless `includeProjected` is true, so a
+suggestion reflects only transactions that happened or matched a real one.
 
 ### `simplifi_status`
 Inputs: none.

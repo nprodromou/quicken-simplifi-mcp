@@ -126,9 +126,19 @@ export class TransactionToolService {
     };
   }
 
-  public async searchMerchants(input: { query: string; limit?: number; includeDeleted?: boolean }): Promise<Record<string, unknown>> {
+  public async searchMerchants(input: {
+    query: string;
+    limit?: number;
+    includeDeleted?: boolean;
+    includeProjected?: boolean;
+  }): Promise<Record<string, unknown>> {
     await this.syncService.ensureFresh(this.maxStaleMs);
-    const merchants = this.db.searchMerchants({ q: input.query, limit: input.limit, includeDeleted: input.includeDeleted });
+    const merchants = this.db.searchMerchants({
+      q: input.query,
+      limit: input.limit,
+      includeDeleted: input.includeDeleted,
+      includeProjected: input.includeProjected,
+    });
     return { merchants };
   }
 
@@ -181,6 +191,7 @@ export class TransactionToolService {
     limit?: number;
     matchMode?: "exact" | "contains";
     refreshCategories?: boolean;
+    includeProjected?: boolean;
   }): Promise<Record<string, unknown>> {
     if (input.refreshCategories) {
       await this.referenceDataService.syncCategories();
@@ -192,6 +203,7 @@ export class TransactionToolService {
       merchant: input.merchant,
       limit: input.limit,
       matchMode: input.matchMode,
+      includeProjected: input.includeProjected,
     });
 
     return { suggestions };

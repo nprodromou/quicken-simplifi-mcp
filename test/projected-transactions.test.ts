@@ -42,6 +42,7 @@ const FIXTURES: Transaction[] = [
     source: "SCHEDULED_TRANSACTION_PENDING",
     state: "PENDING",
     payee: "Streaming Service",
+    coa: { type: "CATEGORY", id: "200" },
   }),
   txn("projected-next", {
     postedOn: "2026-11-15",
@@ -54,6 +55,7 @@ const FIXTURES: Transaction[] = [
     source: "SCHEDULED_TRANSACTION_PENDING",
     state: "PENDING",
     payee: "Streaming Service",
+    coa: { type: "CATEGORY", id: "200" },
   }),
 ];
 
@@ -115,11 +117,35 @@ describe("projected transactions", () => {
       const all = db.listUncategorizedTransactions({ limit: 50, includeProjected: true });
       assert.deepEqual(ids(all.items), ["projected-next", "real-older"]);
     });
+
+    it("leaves projected rows out of searchMerchants counts by default", () => {
+      assert.deepEqual(db.searchMerchants({ q: "streaming" }), [{ merchant: "Streaming Service", count: 1 }]);
+      assert.deepEqual(db.searchMerchants({ q: "streaming", includeProjected: true }), [
+        { merchant: "Streaming Service", count: 3 },
+      ]);
+    });
+
+    it("leaves projected rows out of suggestCategoriesForMerchant by default", () => {
+      assert.deepEqual(db.suggestCategoriesForMerchant({ merchant: "Streaming Service" }), [
+        { coaType: "CATEGORY", coaId: "100", count: 1, categoryName: undefined },
+      ]);
+
+      const all = db.suggestCategoriesForMerchant({ merchant: "streaming", matchMode: "contains", includeProjected: true });
+      assert.deepEqual(
+        all.map((row) => [row.coaId, row.count]),
+        [
+          ["200", 2],
+          ["100", 1],
+        ],
+      );
+    });
   });
 
   describe("TransactionToolService", () => {
     const syncService = { ensureFresh: async () => {}, syncIncremental: async () => {} };
-    const service = () => new TransactionToolService(db, syncService as any, {} as any, {} as any, 60_000);
+    const referenceDataService = { ensureCategoriesFresh: async () => {}, syncCategories: async () => {} };
+    const service = () =>
+      new TransactionToolService(db, syncService as any, {} as any, referenceDataService as any, 60_000);
 
     it("passes includeProjected through from every transaction tool", async () => {
       const listed = (await service().listTransactions({ accountId: ACCOUNT })) as { items: Transaction[] };
@@ -139,6 +165,35 @@ describe("projected transactions", () => {
         total: number;
       };
       assert.equal(uncategorized.total, 2);
+    });
+
+    it("passes includeProjected through from the merchant tools", async () => {
+      const merchants = (await service().searchMerchants({ query: "streaming" })) as {
+        merchants: Array<{ count: number }>;
+      };
+      assert.equal(merchants.merchants[0].count, 1);
+
+      const merchantsAll = (await service().searchMerchants({ query: "streaming", includeProjected: true })) as {
+        merchants: Array<{ count: number }>;
+      };
+      assert.equal(merchantsAll.merchants[0].count, 3);
+
+      const suggestions = (await service().suggestCategoriesForMerchant({ merchant: "Streaming Service" })) as {
+        suggestions: Array<{ coaId: string }>;
+      };
+      assert.deepEqual(
+        suggestions.suggestions.map((row) => row.coaId),
+        ["100"],
+      );
+
+      const suggestionsAll = (await service().suggestCategoriesForMerchant({
+        merchant: "Streaming Service",
+        includeProjected: true,
+      })) as { suggestions: Array<{ coaId: string }> };
+      assert.deepEqual(
+        suggestionsAll.suggestions.map((row) => row.coaId),
+        ["200", "100"],
+      );
     });
   });
 });
