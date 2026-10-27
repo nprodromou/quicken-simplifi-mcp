@@ -1019,7 +1019,12 @@ export class DatabaseContext {
     return rows.map((row) => JSON.parse(row.raw_json) as Tag);
   }
 
-  public searchMerchants(query: { q: string; limit?: number; includeDeleted?: boolean }): Array<{ merchant: string; count: number }> {
+  public searchMerchants(query: {
+    q: string;
+    limit?: number;
+    includeDeleted?: boolean;
+    includeProjected?: boolean;
+  }): Array<{ merchant: string; count: number }> {
     const q = query.q.trim().toLowerCase();
     const limit = Math.min(Math.max(query.limit ?? 20, 1), 200);
 
@@ -1035,10 +1040,16 @@ export class DatabaseContext {
       where.push("is_deleted = 0");
     }
 
+    if (!query.includeProjected) {
+      where.push("COALESCE(source, '') <> ?");
+      values.push(PROJECTED_TRANSACTION_SOURCE);
+    }
+
     const sql = `
       WITH base AS (
         SELECT
           COALESCE(NULLIF(renamed_payee,''), NULLIF(payee,''), NULLIF(ml_inferred_payee,'')) AS merchant,
+          json_extract(raw_json, '$.source') AS source,
           is_deleted
         FROM transactions
       )
@@ -1059,6 +1070,7 @@ export class DatabaseContext {
     limit?: number;
     matchMode?: "exact" | "contains";
     includeDeleted?: boolean;
+    includeProjected?: boolean;
   }): Array<{ coaType: string; coaId: string; count: number; categoryName?: string }> {
     const merchant = input.merchant.trim().toLowerCase();
     const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
@@ -1071,6 +1083,7 @@ export class DatabaseContext {
 
     const value = matchMode === "contains" ? `%${merchant}%` : merchant;
 
+    const values: unknown[] = [value];
     const where: string[] = [
       "merchant IS NOT NULL",
       "merchant <> ''",
@@ -1081,10 +1094,16 @@ export class DatabaseContext {
       where.push("is_deleted = 0");
     }
 
+    if (!input.includeProjected) {
+      where.push("COALESCE(source, '') <> ?");
+      values.push(PROJECTED_TRANSACTION_SOURCE);
+    }
+
     const sql = `
       WITH base AS (
         SELECT
           COALESCE(NULLIF(renamed_payee,''), NULLIF(payee,''), NULLIF(ml_inferred_payee,'')) AS merchant,
+          json_extract(raw_json, '$.source') AS source,
           coa_type,
           coa_id,
           is_deleted
@@ -1107,7 +1126,7 @@ export class DatabaseContext {
       LIMIT ?
     `;
 
-    const rows = this.db.prepare(sql).all(value, limit) as CoaSuggestionRow[];
+    const rows = this.db.prepare(sql).all(...values, limit) as CoaSuggestionRow[];
     return rows
       .filter((row) => typeof row.coa_type === "string" && typeof row.coa_id === "string")
       .map((row) => ({

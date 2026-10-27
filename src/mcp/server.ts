@@ -129,11 +129,12 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
 
   mcp.tool(
     "search_merchants",
-    "Search merchants (payee names) from the cached transaction DB and return frequency counts.",
+    "Search merchants (payee names) from the cached transaction DB and return frequency counts. Projected recurring bills are not counted unless includeProjected is true.",
     {
       query: z.string().min(1),
       limit: z.coerce.number().int().min(1).max(200).optional(),
       includeDeleted: z.boolean().optional(),
+      includeProjected: z.boolean().optional(),
     },
     async (input: any) => {
       const result = await toolService.searchMerchants(input);
@@ -197,12 +198,13 @@ export function createMcpServer(toolService: TransactionToolService, statusServi
 
   mcp.tool(
     "suggest_categories_for_merchant",
-    "Suggest likely categories for a merchant based on your historical transactions in the local cache.",
+    "Suggest likely categories for a merchant based on your historical transactions in the local cache. Projected recurring bills are not counted unless includeProjected is true.",
     {
       merchant: z.string().min(1),
       limit: z.coerce.number().int().min(1).max(20).optional(),
       matchMode: z.enum(["exact", "contains"]).optional(),
       refreshCategories: z.boolean().optional(),
+      includeProjected: z.boolean().optional(),
     },
     async (input: any) => {
       const result = await toolService.suggestCategoriesForMerchant(input);
